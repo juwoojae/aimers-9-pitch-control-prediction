@@ -47,8 +47,9 @@ lg_aimers/
 │   └── trackman_history.csv    # 1,793,078행 × 30컬럼
 ├── model/rf.pkl                # 운영진 베이스라인 모델
 ├── script.py                   # 베이스라인 추론 코드
-├── requirements.txt            # 베이스라인 의존성
+├── requirements.txt            # 추가 의존성 없음(서버 기본 패키지 사용)
 ├── baseline_submit.zip         # 원본 베이스라인 제출 예시
+├── submit.zip                  # 현재 제출용 ZIP
 ├── data_description.md         # 공식 데이터 설명서
 └── docs/                       # 프로젝트 문서
 ```

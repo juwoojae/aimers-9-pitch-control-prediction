@@ -129,7 +129,7 @@ libgl1
 libglib2.0-0
 ```
 
-배포된 베이스라인 `requirements.txt`에는 서버 기본 버전인 `pandas==2.0.3`과 다른 `pandas==2.3.3`이 지정되어 있습니다. 원본은 참고를 위해 보존하되, 실제 제출 전에 기본 버전 사용 여부와 설치 시간을 검증합니다.
+원본 `baseline_submit.zip`은 `pandas==2.3.3`을 지정하지만, 현재 제출용 `requirements.txt`는 평가 서버에 이미 설치된 pandas 2.0.3, scikit-learn 1.8.0, joblib 1.5.3을 그대로 사용합니다. 추가 패키지가 없으므로 설치 충돌과 설치 시간 위험을 줄입니다.
 
 ## 오류 유형과 제출 횟수
 

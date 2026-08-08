@@ -1,3 +1,1 @@
-scikit-learn==1.8.0
-joblib==1.5.3
-pandas==2.3.3
+# 평가 서버 기본 패키지(pandas, scikit-learn, joblib)만 사용합니다.
