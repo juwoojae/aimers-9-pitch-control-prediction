@@ -1,0 +1,11 @@
+# 대용량 공식 배포 데이터는 로컬에만 보관한다.
+/data/*.csv
+
+# 추론 산출물
+/output/
+
+# Python 로컬 환경 및 캐시
+__pycache__/
+*.py[cod]
+.venv/
+venv/
