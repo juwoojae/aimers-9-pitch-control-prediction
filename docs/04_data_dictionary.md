@@ -25,9 +25,9 @@
 | `num_runners_on`, `base_state` | train/test | mixed | 주자 수·루상 조합 | 투구 전 | `AVAILABLE` | 범주·수치 피처 | 서로 파생 관계 |
 | `home_win_expectancy`, `away_win_expectancy` | train/test | float | 투구 직전 기대 승률(0~100) | 투구 전 | `AVAILABLE` | 수치 피처 | 두 값의 관계 검사 필요 |
 | `li` | train/test | float | 투구 직전 상황 중요도 | 투구 전 | `AVAILABLE` | 수치 피처 | 큰 값일수록 중요 |
-| `pitcher_id`, `batter_id` | train/test | int/string | 익명 선수 ID | 투구 전 | `AVAILABLE` | 범주 피처 | 미관측 ID 처리 필요 |
+| `pitcher_id`, `batter_id` | train/test | int/string | 익명 선수 ID | 투구 전 | `AVAILABLE` | 모델 A에서 제공 코드 그대로 사용, 모델 B에서 제외 | ID 제거 모델과 확률 평균하여 코드 순서 의존 위험 완화 |
 | `pitcher_hand`, `batter_hand` | train/test | code | 투타 좌우 유형 | 투구 전 | `AVAILABLE` | 범주 피처 | 코드 의미는 공식 설명 기준 |
-| `pitcher_team_id`, `batter_team_id` | train/test | int/string | 소속 팀 ID | 투구 전 | `AVAILABLE` | 범주 피처 | 시즌별 변화 가능성 확인 |
+| `pitcher_team_id`, `batter_team_id` | train/test | int/string | 소속 팀 ID | 투구 전 | `AVAILABLE` | 모델 A에서 제공 코드 그대로 사용, 모델 B에서 제외 | 시즌별 변화와 코드 순서 의존 위험 완화 |
 | `asof_pitcher_n` | train/test | int | 투수의 직전까지 누적 투구 수 | 투구 전 | `HISTORY_ONLY` | 표본 수·신뢰도 | 운영진이 누수 없이 사전 계산 |
 | `asof_pitcher_success_rate` | train/test | float | 투수 누적 제구 성공률 | 투구 전 | `HISTORY_ONLY` | 확률 피처 | 표본 0이면 결측 가능 |
 | `asof_pitcher_reverse_rate` | train/test | float | 투수 누적 의도 반대성 비율 | 투구 전 | `HISTORY_ONLY` | 확률 피처 | 표본 0이면 결측 가능 |
@@ -65,7 +65,7 @@ Trackman 등 보조 데이터를 사용하면 아래를 반드시 기록합니�
 
 | 보조 데이터 | 조인 키 | 시간 cutoff | 중복 처리 | 미매칭 처리 | 검증 결과 |
 |---|---|---|---|---|---|
-| 2019~2024 Trackman | 메인 데이터와 직접 대응하는 공식 키 없음 | 2019~2024 로그만 사용, 2025 금지 | 집계 단위 설계 필요 | 별도 fallback 필요 | 원본 행 1:1 조인 금지 |
+| 2019~2024 Trackman | 메인 데이터와 직접 대응하는 공식 키 없음 | 2019~2024 로그만 사용, 2025 금지 | 해당 없음 | 해당 없음 | 메인/Trackman 투수·타자 ID 값 교집합이 각각 0이므로 최종 모델에서 제외 |
 
 ## Trackman 컬럼 사용 원칙
 

@@ -1,180 +1,222 @@
-# script.py
-import os
+"""DACON 코드 제출 서버가 실행하는 오프라인 추론 진입점.
+
+학습은 제출 전에 ``train.py``로 완료한다. 이 스크립트는 평가 데이터로
+재학습하거나 통계를 계산하지 않고, ``model/rf.pkl``에 저장된 두 HGB의
+``control_success=1`` 확률을 50:50으로 평균해 제출 파일만 생성한다.
+"""
+
+from __future__ import annotations
+
 import math
+import os
+from pathlib import Path
+
+# 공식 서버의 6 vCPU를 넘겨 불필요한 스레드 경쟁이 생기지 않게 제한한다.
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "6")
+os.environ.setdefault("OMP_NUM_THREADS", "6")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "6")
+os.environ.setdefault("MKL_NUM_THREADS", "6")
 
 import joblib
+import numpy as np
 import pandas as pd
+from threadpoolctl import threadpool_limits
+
 
 ID_COL = "row_id"
 TARGET_COL = "control_success"
+EXPECTED_ARTIFACT_VERSION = "hgb_ensemble_v1"
+ROOT_DIR = Path(__file__).resolve().parent
 
 
-def validate_unique_ids(df, data_name):
-    """row_id의 결측 및 중복을 검사한다."""
-    if df[ID_COL].isna().any():
-        raise ValueError(f"{data_name}에 결측 {ID_COL}가 있음")
-    duplicated = df[ID_COL].duplicated(keep=False)
+def validate_unique_ids(frame: pd.DataFrame, data_name: str) -> None:
+    """누락되거나 중복된 제출 키를 추론 전에 차단한다."""
+    if ID_COL not in frame.columns:
+        raise ValueError(f"{data_name} is missing required column: {ID_COL}")
+    if frame[ID_COL].isna().any():
+        raise ValueError(f"{data_name} contains missing {ID_COL} values")
+    duplicated = frame[ID_COL].duplicated(keep=False)
     if duplicated.any():
-        examples = df.loc[duplicated, ID_COL].head(5).tolist()
+        examples = frame.loc[duplicated, ID_COL].head(5).tolist()
         raise ValueError(
-            f"{data_name}에 중복 {ID_COL}가 {int(duplicated.sum())}건 있음: "
-            f"{examples}"
+            f"{data_name} contains {int(duplicated.sum())} duplicated IDs: {examples}"
         )
 
 
-# =======================
-# 데이터 로드 유틸
-# =======================
-
-def load_test(path):
-    """평가 데이터(csv) 로드. 한 행이 투구 하나."""
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    if ID_COL not in df.columns:
-        raise ValueError(f"test 데이터에 {ID_COL} 컬럼이 없음: {list(df.columns)[:5]}")
-    validate_unique_ids(df, "test")
-    return df
+def load_test(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path, encoding="utf-8-sig", low_memory=False)
+    validate_unique_ids(frame, "test")
+    return frame
 
 
-def load_sample_submission(path):
-    """sample_submission.csv 로드 — 제출 파일의 row_id 순서/컬럼 기준."""
-    df = pd.read_csv(path, encoding="utf-8-sig")
-    if list(df.columns) != [ID_COL, TARGET_COL]:
+def load_sample_submission(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path, encoding="utf-8-sig")
+    if list(frame.columns) != [ID_COL, TARGET_COL]:
         raise ValueError(
-            f"sample_submission 컬럼이 ({ID_COL}, {TARGET_COL})이 아님: "
-            f"{list(df.columns)}")
-    validate_unique_ids(df, "sample_submission")
-    return df
-
-
-def validate_input_alignment(test, sub):
-    """test와 sample_submission의 행 수 및 row_id 집합이 같은지 검사한다."""
-    if len(test) != len(sub):
-        raise ValueError(
-            f"test와 sample_submission 행 수 불일치: {len(test)} != {len(sub)}"
+            "sample_submission columns must be exactly "
+            f"[{ID_COL!r}, {TARGET_COL!r}], got {list(frame.columns)}"
         )
+    validate_unique_ids(frame, "sample_submission")
+    return frame
 
+
+def resolve_input_dir(root: Path) -> Path:
+    """공식 안내에 혼용된 data/와 open/ 입력 경로를 모두 지원한다."""
+    for directory_name in ("data", "open"):
+        candidate = root / directory_name
+        if (candidate / "test.csv").is_file() and (
+            candidate / "sample_submission.csv"
+        ).is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find test.csv and sample_submission.csv under data/ or open/"
+    )
+
+
+def validate_input_alignment(test: pd.DataFrame, submission: pd.DataFrame) -> None:
+    if len(test) != len(submission):
+        raise ValueError(
+            f"test/submission row count mismatch: {len(test)} != {len(submission)}"
+        )
     test_ids = set(test[ID_COL])
-    sub_ids = set(sub[ID_COL])
-    if test_ids != sub_ids:
-        missing = list(sub_ids - test_ids)[:5]
-        extra = list(test_ids - sub_ids)[:5]
+    submission_ids = set(submission[ID_COL])
+    if test_ids != submission_ids:
+        missing = list(submission_ids - test_ids)[:5]
+        extra = list(test_ids - submission_ids)[:5]
         raise ValueError(
-            "test와 sample_submission row_id 불일치: "
-            f"test에 없는 ID 예시={missing}, submission에 없는 ID 예시={extra}"
+            "test/submission row_id mismatch: "
+            f"missing_in_test={missing}, extra_in_test={extra}"
         )
 
 
-# =======================
-# 학습 때 사용한 전처리 (그대로)
-# =======================
-
-def build_features(df):
-    """모델 입력 추출 — 학습 때와 동일하게 row_id만 빼고 전부 사용.
-
-    범주형 인코딩(top_bottom, game_type, base_state)과 결측 대치는
-    모델 파일 안의 파이프라인이 함께 수행하므로 여기서는 컬럼만 고른다.
-    """
-    return df.drop(columns=[ID_COL])
-
-
-# =======================
-# 제출 파일 생성 유틸
-# =======================
-
-def validate_predictions(preds, expected_len):
-    """예측 개수, 유한성 및 확률 범위를 검사하고 float 목록을 반환한다."""
-    if len(preds) != expected_len:
-        raise ValueError(f"예측 개수 불일치: {len(preds)} != {expected_len}")
-
-    validated = []
-    for index, value in enumerate(preds):
-        probability = float(value)
-        if not math.isfinite(probability):
-            raise ValueError(f"유한하지 않은 예측값: index={index}, value={value}")
-        if not 0.0 <= probability <= 1.0:
-            raise ValueError(f"확률 범위 이탈: index={index}, value={probability}")
-        validated.append(probability)
-    return validated
+def load_artifact(path: Path) -> dict:
+    # 아티팩트에는 학습이 끝난 전처리기와 HGB 두 개가 함께 들어 있다.
+    artifact = joblib.load(path)
+    if not isinstance(artifact, dict):
+        raise TypeError("model artifact must be a dictionary")
+    if artifact.get("format_version") != EXPECTED_ARTIFACT_VERSION:
+        raise ValueError(
+            "unsupported model artifact version: "
+            f"{artifact.get('format_version')!r}"
+        )
+    models = artifact.get("models")
+    weights = artifact.get("weights")
+    if not models or not weights or len(models) != len(weights):
+        raise ValueError("model artifact has invalid models/weights")
+    if not np.isfinite(np.asarray(weights, dtype=np.float64)).all():
+        raise ValueError("model weights contain NaN or infinity")
+    if not math.isclose(float(sum(weights)), 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(f"model weights must sum to 1, got {sum(weights)}")
+    return artifact
 
 
-def merge_predictions(sub, ids, preds):
-    """누락 없이 sample_submission의 row_id 순서에 맞춰 예측 확률을 병합한다."""
-    if len(ids) != len(preds):
-        raise ValueError(f"ID와 예측 개수 불일치: {len(ids)} != {len(preds)}")
-    if len(set(ids)) != len(ids):
-        raise ValueError("예측 대상 row_id에 중복이 있음")
-
-    pred_map = dict(zip(ids, preds))
-    sub_ids = sub[ID_COL].tolist()
-    missing = [rid for rid in sub_ids if rid not in pred_map]
-    extra = list(set(pred_map) - set(sub_ids))
+def build_features(test: pd.DataFrame, artifact: dict) -> pd.DataFrame:
+    """학습 당시 컬럼과 평가 컬럼이 정확히 같은지 검사하고 순서를 맞춘다."""
+    features = test.drop(columns=[ID_COL])
+    expected = list(artifact["input_columns"])
+    missing = [column for column in expected if column not in features.columns]
+    extra = [column for column in features.columns if column not in expected]
     if missing or extra:
         raise ValueError(
-            "예측 row_id 불일치: "
-            f"누락 {len(missing)}건 {missing[:5]}, 초과 {len(extra)}건 {extra[:5]}"
+            f"test feature schema mismatch: missing={missing}, extra={extra}"
         )
-
-    sub = sub.copy()
-    sub[TARGET_COL] = [pred_map[rid] for rid in sub_ids]
-    return sub
+    return features[expected]
 
 
-def save_submission(path, sub):
-    if list(sub.columns) != [ID_COL, TARGET_COL]:
-        raise ValueError(f"최종 제출 컬럼 불일치: {list(sub.columns)}")
-    validate_unique_ids(sub, "submission")
-    validate_predictions(sub[TARGET_COL].tolist(), len(sub))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    sub.to_csv(path, index=False, encoding="utf-8")
+def predict_ensemble(artifact: dict, features: pd.DataFrame) -> np.ndarray:
+    """두 모델의 양성 클래스 확률을 저장된 가중치로 평균한다."""
+    if len(features) == 0:
+        return np.empty(0, dtype=np.float64)
+    probability = np.zeros(len(features), dtype=np.float64)
+    positive_class = artifact["positive_class"]
+    for member, weight in zip(artifact["models"], artifact["weights"]):
+        model = member["model"]
+        classes = list(model.classes_)
+        if positive_class not in classes:
+            raise ValueError(
+                f"{member['name']} is missing positive class {positive_class}: {classes}"
+            )
+        member_features = features[member["feature_columns"]]
+        # 평가 데이터에는 predict_proba()만 호출하며 fit/update는 수행하지 않는다.
+        member_probability = model.predict_proba(member_features)[
+            :, classes.index(positive_class)
+        ]
+        probability += float(weight) * member_probability
+    return probability
 
 
-# =======================
-# main
-# =======================
+def validate_predictions(predictions, expected_length: int) -> np.ndarray:
+    """제출 직전 예측 개수, 유한성, 확률 범위를 검사한다."""
+    probability = np.asarray(predictions, dtype=np.float64)
+    if probability.ndim != 1 or len(probability) != expected_length:
+        raise ValueError(
+            f"prediction shape mismatch: {probability.shape} != ({expected_length},)"
+        )
+    if not np.isfinite(probability).all():
+        bad = np.flatnonzero(~np.isfinite(probability))[:5].tolist()
+        raise ValueError(f"predictions contain NaN or infinity at indices: {bad}")
+    outside = (probability < 0.0) | (probability > 1.0)
+    if outside.any():
+        bad = np.flatnonzero(outside)[:5].tolist()
+        raise ValueError(f"predictions are outside [0, 1] at indices: {bad}")
+    return probability
 
-def main():
-    # ---- 경로 변수 (필요에 따라 수정) ----
-    TEST_DIR = "./data"            # test.csv, sample_submission.csv 위치
-    MODEL_DIR = "./model"          # rf.pkl 위치
-    OUT_DIR = "./output"
-    TEST_PATH = os.path.join(TEST_DIR, "test.csv")
-    SAMPLE_SUB_PATH = os.path.join(TEST_DIR, "sample_submission.csv")
-    MODEL_PATH = os.path.join(MODEL_DIR, "rf.pkl")
-    OUT_PATH = os.path.join(OUT_DIR, "submission.csv")
 
-    # ---- 모델 로드 ----
-    print("Load model...")
-    model = joblib.load(MODEL_PATH)
-    print(f" OK. n_features={getattr(model, 'n_features_in_', '?')}")
+def merge_predictions(
+    submission: pd.DataFrame, ids, predictions
+) -> pd.DataFrame:
+    """test의 예측을 sample_submission의 row_id 순서에 맞춰 결합한다."""
+    if len(ids) != len(predictions):
+        raise ValueError(f"ID/prediction count mismatch: {len(ids)} != {len(predictions)}")
+    if len(set(ids)) != len(ids):
+        raise ValueError("prediction IDs contain duplicates")
+    prediction_map = dict(zip(ids, predictions))
+    submission_ids = submission[ID_COL].tolist()
+    missing = [row_id for row_id in submission_ids if row_id not in prediction_map]
+    extra = list(set(prediction_map) - set(submission_ids))
+    if missing or extra:
+        raise ValueError(
+            f"prediction ID mismatch: missing={missing[:5]}, extra={extra[:5]}"
+        )
+    result = submission.copy()
+    result[TARGET_COL] = [prediction_map[row_id] for row_id in submission_ids]
+    return result
 
-    # ---- 테스트 데이터 로드 ----
-    print("Load test data...")
-    test = load_test(TEST_PATH)
-    sub = load_sample_submission(SAMPLE_SUB_PATH)
-    validate_input_alignment(test, sub)
-    print(f" test={len(test)}  submission={len(sub)}")
 
-    # ---- 전처리 (학습과 동일) ----
-    print("Build features...")
-    ids = test[ID_COL].tolist()
-    X = build_features(test)
-    print(f" features={X.shape[1]}")
+def save_submission(path: Path, submission: pd.DataFrame) -> None:
+    """최종 스키마를 한 번 더 검사한 뒤 UTF-8 CSV로 저장한다."""
+    if list(submission.columns) != [ID_COL, TARGET_COL]:
+        raise ValueError(f"invalid final columns: {list(submission.columns)}")
+    validate_unique_ids(submission, "submission")
+    validate_predictions(submission[TARGET_COL], len(submission))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    submission.to_csv(path, index=False, encoding="utf-8")
 
-    # ---- 예측 (제구 성공 확률) ----
-    print("Inference model...")
-    classes = list(getattr(model, "classes_", []))
-    if 1 not in classes:
-        raise ValueError(f"모델 클래스에 양성 클래스 1이 없음: {classes}")
-    positive_class_index = classes.index(1)
-    preds = model.predict_proba(X)[:, positive_class_index] if len(X) else []
-    preds = validate_predictions(preds, len(test))
-    print(f" preds={len(preds)}")
 
-    # ---- sample_submission 기반 결과 생성 ----
-    print("Build submission...")
-    sub = merge_predictions(sub, ids, preds)
-    save_submission(OUT_PATH, sub)
-    print(f"Saved: {OUT_PATH} (rows={len(sub)})")
+def main() -> None:
+    input_dir = resolve_input_dir(ROOT_DIR)
+    test_path = input_dir / "test.csv"
+    sample_path = input_dir / "sample_submission.csv"
+    model_path = ROOT_DIR / "model" / "rf.pkl"
+    output_path = ROOT_DIR / "output" / "submission.csv"
+
+    # 서버에서는 입력 디렉터리만 교체되며 모델 학습은 수행하지 않는다.
+    print("모델 아티팩트 로드...")
+    artifact = load_artifact(model_path)
+    print("평가 입력 로드 및 검증...")
+    test = load_test(test_path)
+    submission = load_sample_submission(sample_path)
+    validate_input_alignment(test, submission)
+    features = build_features(test, artifact)
+
+    print(f"오프라인 앙상블 추론: rows={len(test)}, models={len(artifact['models'])}")
+    with threadpool_limits(limits=6):
+        predictions = predict_ensemble(artifact, features)
+    predictions = validate_predictions(predictions, len(test))
+
+    result = merge_predictions(submission, test[ID_COL].tolist(), predictions)
+    save_submission(output_path, result)
+    print(f"제출 파일 저장: {output_path} (rows={len(result)})")
 
 
 if __name__ == "__main__":

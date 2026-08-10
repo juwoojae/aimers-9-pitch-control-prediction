@@ -4,8 +4,15 @@
 # 추론 산출물
 /output/
 
+# 학습/검증 실행 시 생성되는 재현 로그
+/model/training_report.json
+/model/validation_report.json
+
 # Python 로컬 환경 및 캐시
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# IDE 로컬 설정
+.idea/

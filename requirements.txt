@@ -1,1 +1,1 @@
-# 평가 서버 기본 패키지(pandas, scikit-learn, joblib)만 사용합니다.
+# 평가 서버 기본 패키지(pandas, numpy, scikit-learn, joblib, threadpoolctl)만 사용합니다.
