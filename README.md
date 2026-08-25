@@ -176,3 +176,4 @@ lg_aimers/
 - [공식 데이터 설명](data_description.md)
 
 공식 자료: [대회 평가 페이지](https://dacon.io/competitions/official/236743/overview/evaluation), [DACON 코드 제출 가이드](https://cfiles.dacon.co.kr/competitions/236564/guide.html)
+공식 사이트: [LG Aimers](https://www.lgaimers.ai/)
